@@ -35,17 +35,15 @@ def main():
     print("=== 図面リビジョン抽出処理を開始します ===")
     print(f"入力ファイル: {', '.join([os.path.basename(p) for p in INPUT_PDF_PATHS])}")
 
-    # 1. PDF -> PNG 変換 (複数のPDFを結合してから変換)
+    # 1. PDF -> PNG 変換
     print("複数のPDFを結合し、PNGに変換しています...")
-    # loader.py の process_multiple_pdfs を呼び出す
     loader.process_multiple_pdfs(
         pdf_paths=INPUT_PDF_PATHS,
         dpi=400,
         output_folder_name=PNG_OUTPUT_FOLDER,
-        merge_first=True  # 先にPDFを結合するオプション
+        merge_first=True
     )
     
-    # 変換が成功したかどうかの簡易チェック
     if not os.path.exists(PNG_OUTPUT_FOLDER) or not os.listdir(PNG_OUTPUT_FOLDER):
         print("エラー: PNGファイルへの変換に失敗しました。処理を中断します。")
         return
@@ -57,41 +55,47 @@ def main():
 
     if not special_pages["revision_history"]:
         print("エラー: 変更履歴一覧表が見つかりませんでした。処理を中断します。")
-        # 一時フォルダが作成されていれば削除
         if os.path.exists(PNG_OUTPUT_FOLDER):
             shutil.rmtree(PNG_OUTPUT_FOLDER)
         return
 
-    # ★★★★★★★★★★★★★★★★★ 修正箇所 ★★★★★★★★★★★★★★★★★
-    # 変更履歴一覧表が複数ページある可能性を考慮し、1ページずつ解析して結果をマージする
-    
     print("発見された変更履歴一覧表を1ページずつ解析します...")
     full_revision_data = {}
     for rev_page_path in special_pages["revision_history"]:
         print(f"  -> 解析中: {os.path.basename(rev_page_path)}")
-        # 1ページずつ解析関数を呼び出す
         single_page_data = parser.parse_revision_history(rev_page_path)
         
         if single_page_data:
-            # 解析結果を結合（マージ）
+            # ★★★ 変更点: シンプルなデータ構造のマージ処理 ★★★
             for key, value in single_page_data.items():
+                if not isinstance(value, list):
+                    print(f"  [警告] 記号 '{key}' のデータ形式が不正（リストでない）です。スキップします。")
+                    continue
+                
                 if key in full_revision_data:
                     full_revision_data[key].extend(value)
                 else:
                     full_revision_data[key] = value
 
-    # マージしたデータを後続の処理で使う変数に代入
-    revision_data = full_revision_data
-    # ★★★★★★★★★★★★★★★★★ 修正ここまで ★★★★★★★★★★★★★★★★★
-
-    if not revision_data:
+    if not full_revision_data:
         print("エラー: 変更履歴の解析に失敗しました。処理を中断します。")
-        # 一時フォルダが作成されていれば削除
         if os.path.exists(PNG_OUTPUT_FOLDER):
             shutil.rmtree(PNG_OUTPUT_FOLDER)
         return
+        
     print("変更履歴の解析が完了しました。")
-    print("-" * 20)
+
+    # ★★★ 変更点: 「記号」と「ページ番号」を表示する ★★★
+    print("\n--- 解析された変更履歴一覧 ---")
+    for symbol, pages_list in full_revision_data.items():
+        # ページリストをカンマ区切りの文字列に変換
+        pages_str = ", ".join(pages_list)
+        print(f"記号: {symbol}")
+        print(f"  頁  : {pages_str}")
+    print("----------------------------\n")
+
+    # 変数をそのまま後続の処理に渡す
+    revision_data = full_revision_data
 
     # 3. 該当ページの探索
     print(f"変更記号 '{TARGET_REVISION}' のページを探索します...")
@@ -103,7 +107,6 @@ def main():
 
     if not found_pages:
         print(f"変更記号 '{TARGET_REVISION}' に該当するページが見つかりませんでした。")
-        # 一時フォルダが作成されていれば削除
         if os.path.exists(PNG_OUTPUT_FOLDER):
             shutil.rmtree(PNG_OUTPUT_FOLDER)
         return
@@ -111,19 +114,15 @@ def main():
 
     # 4. 見つかったページをPDFに結合
     print("見つかったページをPDFにまとめています...")
-
-    # assembler.pyがフォルダ指定のため、一時フォルダに見つかったPNGをコピーする
     temp_assembly_folder = "temp_for_assembly"
     os.makedirs(temp_assembly_folder, exist_ok=True)
     for page_path in found_pages:
         shutil.copy(page_path, temp_assembly_folder)
 
-    # 出力先ディレクトリの作成
     output_dir = os.path.dirname(FINAL_PDF_PATH)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    # assembler.pyの関数を呼び出す
     assembler.pngs_to_pdf(temp_assembly_folder, FINAL_PDF_PATH)
     print(f"'{FINAL_PDF_PATH}' にPDFを出力しました。")
 
@@ -137,3 +136,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
