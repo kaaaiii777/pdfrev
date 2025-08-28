@@ -6,6 +6,7 @@ from gemini_handler import get_text_from_image
 def find_pages_for_revision(png_folder, revision_data, target_revision):
     """
     指定された変更記号に対応するページだけを、二分探索を用いて効率的に見つける。
+    探索失敗時に最大2回までリトライする機能を追加。
     """
     if target_revision not in revision_data or not revision_data[target_revision]:
         print(f"エラー: 変更記号 '{target_revision}' は変更履歴一覧に存在しないか、ページが空です。")
@@ -24,27 +25,28 @@ def find_pages_for_revision(png_folder, revision_data, target_revision):
     ns_key = natsort.natsort_keygen() # 自然順ソート用のキー生成関数
 
     # --- 2. ヘルパー関数の定義 ---
-    def _get_page_number_at_index(index):
+    # ★★★ 変更点: アクセスしたパスを記録するための引数を追加 ★★★
+    def _get_page_number_at_index(index, accessed_paths):
         """指定されたインデックスの画像のページ番号をOCRまたはキャッシュから取得する。"""
         if not (0 <= index < len(png_files)):
             return None
             
         image_path = os.path.join(png_folder, png_files[index])
+        accessed_paths.add(image_path) # この探索でアクセスしたパスとして記録
         
         if image_path in ocr_cache:
-            # ★★★ ここが修正箇所です ★★★
             return ocr_cache[image_path]
 
         prompt = "この図面画像の右下に記載されているページ番号（例：'A-104'）だけを抽出してください。図面番号（例：'W426297'）は無視してください。"
         page_number_text = get_text_from_image(image_path, prompt)
         
+        # デバッグ用のプリント文はキャッシュ保存の直前に移動
         extracted_num = None
         if page_number_text:
             match = re.search(r'([a-zA-Z0-9\-]+)', page_number_text)
             if match:
                 extracted_num = match.group(1)
         
-        # デバッグ用のプリント文
         print(f"  [DEBUG] file: {os.path.basename(image_path):>8s} | AI raw output: '{page_number_text}' | Extracted: '{extracted_num}'")
 
         ocr_cache[image_path] = extracted_num
@@ -54,37 +56,55 @@ def find_pages_for_revision(png_folder, revision_data, target_revision):
     for target_page in natsort.natsorted(list(target_pages_to_find)):
         
         print(f"\n探索ターゲット: '{target_page}'")
-        low, high = 0, len(png_files) - 1
         found = False
+        max_attempts = 3 # 合計試行回数
 
-        while low <= high:
-            mid = (low + high) // 2
-            current_page_num = _get_page_number_at_index(mid)
+        # ★★★ 変更点: リトライ（再試行）のためのループを追加 ★★★
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                print(f"  -> 再探索 ({attempt + 1}/{max_attempts}回目)...")
 
-            if current_page_num is None:
-                # OCR失敗時のフォールバック
-                neighbor_page_num = _get_page_number_at_index(mid + 1)
-                if neighbor_page_num:
-                    if ns_key(neighbor_page_num) < ns_key(target_page):
-                        low = mid + 2
+            low, high = 0, len(png_files) - 1
+            accessed_paths_in_attempt = set() # この試行でアクセスしたパスを記録
+
+            while low <= high:
+                mid = (low + high) // 2
+                current_page_num = _get_page_number_at_index(mid, accessed_paths_in_attempt)
+
+                if current_page_num is None:
+                    neighbor_page_num = _get_page_number_at_index(mid + 1, accessed_paths_in_attempt)
+                    if neighbor_page_num:
+                        if ns_key(neighbor_page_num) < ns_key(target_page):
+                            low = mid + 2
+                        else:
+                            high = mid - 1
                     else:
                         high = mid - 1
-                else:
-                    high = mid - 1
-                continue
+                    continue
 
-            if ns_key(current_page_num) < ns_key(target_page):
-                low = mid + 1
-            elif ns_key(current_page_num) > ns_key(target_page):
-                high = mid - 1
-            else: # ターゲットを発見
-                print(f"  -> ページ '{current_page_num}' を発見しました: {png_files[mid]}")
-                found_pages_map[current_page_num] = os.path.join(png_folder, png_files[mid])
-                found = True
+                if ns_key(current_page_num) < ns_key(target_page):
+                    low = mid + 1
+                elif ns_key(current_page_num) > ns_key(target_page):
+                    high = mid - 1
+                else: # ターゲットを発見
+                    print(f"  -> ページ '{current_page_num}' を発見しました: {png_files[mid]}")
+                    found_pages_map[current_page_num] = os.path.join(png_folder, png_files[mid])
+                    found = True
+                    break
+            
+            # 発見できたらリトライループを抜ける
+            if found:
                 break
-        
+            
+            # 失敗した場合、次の試行の前にキャッシュをクリア
+            if attempt < max_attempts - 1:
+                for path in accessed_paths_in_attempt:
+                    if path in ocr_cache:
+                        del ocr_cache[path]
+
+        # 最終的な結果を報告
         if not found:
-             print(f"  -> ページ '{target_page}' は見つかりませんでした。")
+             print(f"  -> ページ '{target_page}' は見つかりませんでした。({max_attempts}回試行)")
 
 
     # --- 4. 最終結果の整形 ---
