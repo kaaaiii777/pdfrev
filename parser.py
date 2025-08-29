@@ -1,7 +1,11 @@
 import os
 import json
 import re
+import logging
 from gemini_handler import get_text_from_image
+
+# ロガーを取得
+logger = logging.getLogger(__name__)
 
 def _find_special_pages(png_folder):
     """
@@ -16,17 +20,17 @@ def _find_special_pages(png_folder):
     )
 
     if not png_files:
-        print("警告: PNGフォルダに画像がありません。")
+        logger.warning("PNGフォルダに画像がありません。")
         return special_pages
 
     page_index = 0
 
     # --- フェーズ1: 目次の探索 ---
-    print("--- フェーズ1: 目次の探索を開始します ---")
+    logger.info("フェーズ1: 目次の探索を開始します。")
     
     first_page_file = png_files[0]
     first_image_path = os.path.join(png_folder, first_page_file)
-    print(f"  [仮定] 最初のページ '{first_page_file}' を目次として追加します。")
+    logger.info(f"  [仮定] 最初のページ '{first_page_file}' を目次として追加します。")
     special_pages["toc"].append(first_image_path)
     page_index = 1
 
@@ -37,15 +41,15 @@ def _find_special_pages(png_folder):
         title = get_text_from_image(image_path, prompt)
 
         if title and "目次" in title:
-            print(f"  [発見] 連続する目次ページ: {png_file}")
+            logger.info(f"  [発見] 連続する目次ページ: {png_file}")
             special_pages["toc"].append(image_path)
             page_index += 1
         else:
-            print(f"  [情報] '{png_file}' は目次ではありません。目次の探索を終了します。")
+            logger.info(f"  '{png_file}' は目次ではありません。目次の探索を終了します。")
             break
     
     # --- フェーズ2: 変更履歴一覧表の探索 ---
-    print("\n--- フェーズ2: 変更履歴一覧表の探索を開始します (目次との間に他のページが存在する可能性を考慮) ---")
+    logger.info("フェーズ2: 変更履歴一覧表の探索を開始します。")
     
     while page_index < len(png_files):
         png_file = png_files[page_index]
@@ -54,23 +58,22 @@ def _find_special_pages(png_folder):
         title = get_text_from_image(image_path, prompt)
 
         if title and "変更履歴一覧表" in title:
-            print(f"  [発見] 変更履歴一覧表ページ: {png_file}")
+            logger.info(f"  [発見] 変更履歴一覧表ページ: {png_file}")
             special_pages["revision_history"].append(image_path)
             page_index += 1
         else:
             if special_pages["revision_history"]:
-                print(f"  [情報] '{png_file}' は変更履歴一覧表ではありません。変更履歴一覧表の探索を終了します。")
+                logger.info(f"  '{png_file}' は変更履歴一覧表ではありません。探索を終了します。")
                 break
             else:
-                print(f"  [スキップ] '{png_file}' は変更履歴一覧表ではありません。探索を続行します。")
+                logger.info(f"  [スキップ] '{png_file}' は変更履歴一覧表ではありません。探索を続行します。")
                 page_index += 1
 
-    print("\n--- 全ての探索が完了しました ---")
+    logger.info("全ての探索が完了しました。")
     return special_pages
 
 def parse_revision_history(image_path):
     """変更履歴一覧表の画像を解析し、変更記号とページの対応辞書を返す。"""
-    # ★★★ 変更点: プロンプトを「記号」と「頁」のみを要求するシンプルなものに戻す ★★★
     prompt = """
     この画像は「変更履歴一覧表」です。
     表の内容を読み取り、各「変更記号」に対応する「変更頁」のリストをJSON形式で出力してください。
@@ -98,14 +101,14 @@ def parse_revision_history(image_path):
                     data[key] = [p.strip() for p in pages if p.strip()]
             return data
         else:
-            print("警告: Geminiの応答からJSONを抽出できませんでした。")
+            logger.warning("Geminiの応答からJSONを抽出できませんでした。")
             return None
     except json.JSONDecodeError:
-        print("エラー: Geminiの応答をJSONとして解析できませんでした。")
+        logger.error("Geminiの応答をJSONとして解析できませんでした。")
         return None
 
 if __name__ == '__main__':
-    # (テストコードは変更なし)
+    # このファイルを直接実行した際のテストコード
     test_png_folder = "temp_png_images" 
     if os.path.exists(test_png_folder):
         pages = _find_special_pages(test_png_folder)
