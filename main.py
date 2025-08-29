@@ -15,7 +15,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # --- 設定項目 ---
 INPUT_PDF_PATHS = [
-    r"C:\Users\81804\Desktop\.vscode\pdfrev\input\パターン1変更後.pdf",
+    r"C:\Users\81804\Desktop\.vscode\pdfrev\input\パターン3変更後.pdf",
 ]
 # -----------------
 
@@ -51,17 +51,19 @@ def process_one_revision(target_revision, png_folder, revision_data, session_pat
     print(f"変更記号 '{target_revision}' の処理を開始します...")
 
     print(f"-> ページを探索しています...")
+    # found_pages_map は { '見つかった論理ページ': '物理ファイルパス' } の辞書
     found_pages_map = finder.find_pages_for_revision(
         png_folder,
         revision_data,
         target_revision
     )
 
+    # 探索結果ログを supplemental_data フォルダに保存
     search_log_path = os.path.join(session_paths["supplemental"], f"search_log_{target_revision}.csv")
     with open(search_log_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
-        writer.writerow(['TargetPage', 'Status', 'FoundFilePath'])
-        # revision_dataにtarget_revisionが存在するかチェック
+        writer.writerow(['TargetPage', 'Status', 'FoundFile'])
+        
         if target_revision in revision_data:
             for page in revision_data[target_revision]:
                 if page in found_pages_map:
@@ -80,6 +82,7 @@ def process_one_revision(target_revision, png_folder, revision_data, session_pat
     for page_path in found_page_paths:
         shutil.copy(page_path, temp_assembly_folder)
 
+    # 抽出PDFを output フォルダに保存
     final_pdf_path = os.path.join(session_paths["output"], f"extracted_rev_{target_revision}.pdf")
     assembler.pngs_to_pdf(temp_assembly_folder, final_pdf_path)
     print(f"-> ✅ 完了: '{final_pdf_path}' にPDFを出力しました。")
@@ -88,6 +91,7 @@ def process_one_revision(target_revision, png_folder, revision_data, session_pat
 
 def main():
     """メイン処理フロー"""
+    # === ステップ1: セッションフォルダとキャッシュフォルダの準備 ===
     session_paths = setup_session_directory()
     cache_folder = get_cache_folder_name(INPUT_PDF_PATHS)
     json_cache_path = os.path.join(cache_folder, "analysis_cache.json")
@@ -101,6 +105,7 @@ def main():
     print(f"PNGキャッシュ '{cache_folder}' の準備が完了しました。")
     print("-" * 30)
 
+    # === ステップ2: 変更履歴の解析（キャッシュ利用） ===
     if os.path.exists(json_cache_path):
         print(f"既存の解析結果 '{os.path.basename(json_cache_path)}' を再利用します。")
         with open(json_cache_path, 'r', encoding='utf-8') as f:
@@ -129,6 +134,7 @@ def main():
         
     print("変更履歴の解析が完了しました。")
     
+    # 解析結果のサマリーを supplemental_data フォルダに保存
     summary_csv_path = os.path.join(session_paths["supplemental"], "revision_summary.csv")
     with open(summary_csv_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
@@ -138,22 +144,20 @@ def main():
     print(f"解析結果のサマリーを '{summary_csv_path}' に保存しました。")
     print("----------------------------\n")
 
+    # === ステップ3: 対話形式ループ ===
     available_revisions = sorted(full_revision_data.keys(), key=natsort.natsort_keygen())
     while True:
         prompt_text = f"抽出したい変更記号を入力してください ({', '.join(available_revisions)}) (終了するにはqを入力): "
-        # ★★★ 変更点: .upper() を削除 ★★★
         user_input = input(prompt_text).strip()
 
-        # 終了コマンドは小文字でも受け付けるようにする
-        if user_input.lower() in ['q', 'quit']:
-            print("処理を終了します。")
-            break
+        if user_input.lower() in ['q', 'quit']: print("処理を終了します。"); break
         
         if user_input in full_revision_data:
             process_one_revision(user_input, cache_folder, full_revision_data, session_paths)
         else:
             print(f"エラー: 記号 '{user_input}' は変更履歴一覧に存在しません。")
 
+    # === ステップ4: 終了処理 ===
     print("-" * 30)
     print("結果は以下のフォルダに保存されています：")
     print(session_paths["session_root"])
