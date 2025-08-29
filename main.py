@@ -6,7 +6,8 @@ import natsort
 import csv
 import datetime
 import logging
-import logger_setup # 新規インポート
+import time
+import logger_setup
 import loader
 import parser
 import finder
@@ -20,6 +21,14 @@ INPUT_PDF_PATHS = [
     r"C:\Users\81804\Desktop\.vscode\pdfrev\input\パターン3変更後.pdf",
 ]
 # -----------------
+
+def format_duration(seconds):
+    """秒数を分と秒にフォーマットする"""
+    if seconds is None:
+        return "スキップ"
+    minutes = int(seconds // 60)
+    remaining_seconds = seconds % 60
+    return f"{minutes}分{remaining_seconds:.2f}秒"
 
 def setup_session_directory():
     """タイムスタンプ付きのセッション結果フォルダとサブフォルダを作成する"""
@@ -51,14 +60,18 @@ def process_one_revision(target_revision, png_folder, revision_data, session_pat
     """一つの変更記号に対応する処理を行い、結果を各フォルダに保存する"""
     logging.info("-" * 30)
     logging.info(f"変更記号 '{target_revision}' の処理を開始します...")
+    
     logging.info(f"-> ページを探索しています...")
+    search_start_time = time.perf_counter()
     found_pages_map = finder.find_pages_for_revision(
         png_folder,
         revision_data,
         target_revision
     )
+    search_duration = time.perf_counter() - search_start_time
+    logging.info(f"-> 探索完了 ({format_duration(search_duration)})")
+
     search_log_path = os.path.join(session_paths["supplemental"], f"search_log_{target_revision}.csv")
-    logging.info(f"-> 探索結果を '{search_log_path}' に記録しています...")
     with open(search_log_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(['TargetPage', 'Status', 'FoundFile'])
@@ -68,88 +81,125 @@ def process_one_revision(target_revision, png_folder, revision_data, session_pat
                     writer.writerow([page, 'Found', os.path.basename(found_pages_map[page])])
                 else:
                     writer.writerow([page, 'NotFound', ''])
+    
     found_page_paths = list(found_pages_map.values())
     if not found_page_paths:
         logging.warning(f"-> 変更記号 '{target_revision}' に該当するページが見つかりませんでした。")
-        return
+        return {"search_time": search_duration, "pdf_time": 0}
+
     logging.info(f"-> 見つかった {len(found_page_paths)} ページをPDFにまとめています...")
+    pdf_start_time = time.perf_counter()
     temp_assembly_folder = os.path.join(session_paths["session_root"], f"temp_assembly_{target_revision}")
     os.makedirs(temp_assembly_folder, exist_ok=True)
     for page_path in found_page_paths:
         shutil.copy(page_path, temp_assembly_folder)
     final_pdf_path = os.path.join(session_paths["output"], f"extracted_rev_{target_revision}.pdf")
     assembler.pngs_to_pdf(temp_assembly_folder, final_pdf_path)
-    logging.info(f"-> ✅ 完了: '{final_pdf_path}' にPDFを出力しました。")
     shutil.rmtree(temp_assembly_folder)
+    pdf_duration = time.perf_counter() - pdf_start_time
+    logging.info(f"-> ✅ 完了: '{final_pdf_path}' にPDFを出力しました。 ({format_duration(pdf_duration)})")
+    
+    return {"search_time": search_duration, "pdf_time": pdf_duration}
 
 def main():
     """メイン処理フロー"""
     session_paths = setup_session_directory()
-    
-    # === ロギング設定 ===
     log_file_path = os.path.join(session_paths["supplemental"], "run.log")
     logger_setup.setup_logging(log_file_path)
     
-    logging.info("=== 図面リビジョン抽出処理を開始します ===")
-    
-    cache_folder = get_cache_folder_name(INPUT_PDF_PATHS)
-    json_cache_path = os.path.join(cache_folder, "analysis_cache.json")
-    full_revision_data = {}
-    if not (os.path.exists(cache_folder) and os.listdir(cache_folder)):
-        logging.info(f"PNGキャッシュ '{cache_folder}' を新規に作成します...")
-        loader.process_multiple_pdfs(pdf_paths=INPUT_PDF_PATHS, dpi=400, output_folder_name=cache_folder, merge_first=True)
+    timings = {}
+    total_start_time = time.perf_counter()
+
+    try:
+        logging.info("=== 図面リビジョン抽出処理を開始します ===")
+        
+        cache_folder = get_cache_folder_name(INPUT_PDF_PATHS)
+        json_cache_path = os.path.join(cache_folder, "analysis_cache.json")
+        full_revision_data = {}
+
+        step_start_time = time.perf_counter()
+        png_conversion_executed = False
         if not (os.path.exists(cache_folder) and os.listdir(cache_folder)):
-            logging.error("PNGファイルへの変換に失敗しました。処理を中断します。"); return
-    logging.info(f"PNGキャッシュ '{cache_folder}' の準備が完了しました。")
-    logging.info("-" * 30)
+            png_conversion_executed = True
+            logging.info(f"PNGキャッシュ '{cache_folder}' を新規に作成します...")
+            loader.process_multiple_pdfs(pdf_paths=INPUT_PDF_PATHS, dpi=400, output_folder_name=cache_folder, merge_first=True)
+            if not (os.path.exists(cache_folder) and os.listdir(cache_folder)):
+                logging.critical("PNGファイルへの変換に失敗しました。処理を中断します。"); return
+        if png_conversion_executed:
+            timings['Step 1 (PDF→PNG変換)'] = time.perf_counter() - step_start_time
+        logging.info(f"PNGキャッシュ '{cache_folder}' の準備が完了しました。")
+        logging.info("-" * 30)
 
-    if os.path.exists(json_cache_path):
-        logging.info(f"既存の解析結果 '{os.path.basename(json_cache_path)}' を再利用します。")
-        with open(json_cache_path, 'r', encoding='utf-8') as f:
-            full_revision_data = json.load(f)['revision_data']
-    else:
-        logging.info("変更履歴一覧表の場所を探索・解析しています... (初回のみ)")
-        special_pages_paths = parser._find_special_pages(cache_folder)
-        if not special_pages_paths["revision_history"]:
-            logging.error("変更履歴一覧表が見つかりませんでした。"); return
-        for rev_page_path in special_pages_paths["revision_history"]:
-            single_page_data = parser.parse_revision_history(rev_page_path)
-            if single_page_data:
-                for key, value in single_page_data.items():
-                    if not isinstance(value, list): continue
-                    if key in full_revision_data: full_revision_data[key].extend(value)
-                    else: full_revision_data[key] = value
-        if full_revision_data:
-            logging.info(f"解析結果を '{json_cache_path}' に保存しています...")
-            with open(json_cache_path, 'w', encoding='utf-8') as f:
-                json.dump({'revision_data': full_revision_data}, f, ensure_ascii=False, indent=4)
-    if not full_revision_data:
-        logging.error("変更履歴の解析に失敗しました。"); return
-    logging.info("変更履歴の解析が完了しました。")
-    summary_csv_path = os.path.join(session_paths["supplemental"], "revision_summary.csv")
-    with open(summary_csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f)
-        writer.writerow(['RevisionSymbol', 'PageCount', 'PageList'])
-        for symbol, pages_list in sorted(full_revision_data.items(), key=lambda item: natsort.natsort_keygen()(item[0])):
-            writer.writerow([symbol, len(pages_list), ", ".join(pages_list)])
-    logging.info(f"解析結果のサマリーを '{summary_csv_path}' に保存しました。")
-    logging.info("----------------------------\n")
-
-    available_revisions = sorted(full_revision_data.keys(), key=natsort.natsort_keygen())
-    while True:
-        prompt_text = f"抽出したい変更記号を入力してください ({', '.join(available_revisions)}) (終了するにはqを入力): "
-        user_input = input(prompt_text).strip()
-        if user_input.lower() in ['q', 'quit']:
-            logging.info("ユーザーにより処理が終了されました。")
-            break
-        if user_input in full_revision_data:
-            process_one_revision(user_input, cache_folder, full_revision_data, session_paths)
+        step_start_time = time.perf_counter()
+        parsing_executed = False
+        if os.path.exists(json_cache_path):
+            logging.info(f"既存の解析結果 '{os.path.basename(json_cache_path)}' を再利用します。")
+            with open(json_cache_path, 'r', encoding='utf-8') as f:
+                full_revision_data = json.load(f)['revision_data']
         else:
-            logging.warning(f"記号 '{user_input}' は変更履歴一覧に存在しません。")
-    
-    logging.info("-" * 30)
-    logging.info("結果は以下のフォルダに保存されています：")
-    logging.info(session_paths["session_root"])
+            parsing_executed = True
+            logging.info("変更履歴一覧表の場所を探索・解析しています... (初回のみ)")
+            special_pages_paths = parser._find_special_pages(cache_folder)
+            if not special_pages_paths["revision_history"]:
+                logging.error("変更履歴一覧表が見つかりませんでした。"); return
+            for rev_page_path in special_pages_paths["revision_history"]:
+                single_page_data = parser.parse_revision_history(rev_page_path)
+                if single_page_data:
+                    for key, value in single_page_data.items():
+                        if not isinstance(value, list): continue
+                        if key in full_revision_data: full_revision_data[key].extend(value)
+                        else: full_revision_data[key] = value
+            if full_revision_data:
+                logging.info(f"解析結果を '{json_cache_path}' に保存しています...")
+                with open(json_cache_path, 'w', encoding='utf-8') as f:
+                    json.dump({'revision_data': full_revision_data}, f, ensure_ascii=False, indent=4)
+        if parsing_executed:
+            timings['Step 2 (変更履歴の解析)'] = time.perf_counter() - step_start_time
+        
+        if not full_revision_data:
+            logging.error("変更履歴の解析に失敗しました。"); return
+        logging.info("変更履歴の解析が完了しました。")
+        
+        summary_csv_path = os.path.join(session_paths["supplemental"], "revision_summary.csv")
+        with open(summary_csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.writer(f)
+            writer.writerow(['RevisionSymbol', 'PageCount', 'PageList'])
+            for symbol, pages_list in sorted(full_revision_data.items(), key=lambda item: natsort.natsort_keygen()(item[0])):
+                writer.writerow([symbol, len(pages_list), ", ".join(pages_list)])
+        logging.info(f"解析結果のサマリーを '{summary_csv_path}' に保存しました。")
+        
+        logging.info("----------------------------\n")
+
+        available_revisions = sorted(full_revision_data.keys(), key=natsort.natsort_keygen())
+        total_search_time = 0
+        total_pdf_time = 0
+        while True:
+            prompt_text = f"抽出したい変更記号を入力してください ({', '.join(available_revisions)}) (終了するにはqを入力): "
+            user_input = input(prompt_text).strip()
+            if user_input.lower() in ['q', 'quit']:
+                logging.info("ユーザーにより処理が終了されました。")
+                break
+            if user_input in full_revision_data:
+                result_times = process_one_revision(user_input, cache_folder, full_revision_data, session_paths)
+                if result_times:
+                    total_search_time += result_times.get("search_time", 0)
+                    total_pdf_time += result_times.get("pdf_time", 0)
+            else:
+                logging.warning(f"エラー: 記号 '{user_input}' は変更履歴一覧に存在しません。")
+        
+        if total_search_time > 0: timings['Step 3 (ページ探索 合計)'] = total_search_time
+        if total_pdf_time > 0: timings['Step 4 (PDF生成 合計)'] = total_pdf_time
+
+    finally:
+        total_duration = time.perf_counter() - total_start_time
+        timings['合計実行時間'] = total_duration
+        summary_text = "\n\n" + "="*50 + "\n実行時間サマリー:\n"
+        for step, duration in timings.items():
+            summary_text += f"  - {step}: {format_duration(duration)}\n"
+        summary_text += "="*50
+        
+        # ★★★ 変更点: print()を削除し、logging.info()のみにする ★★★
+        logging.info(summary_text)
 
 if __name__ == '__main__':
     main()
